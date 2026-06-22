@@ -1236,6 +1236,34 @@ impl Editor {
         }))
     }
 
+    /// Runs an LSP "find all references" query for the symbol under the cursor
+    /// and returns the raw [`Location`]s. Unlike [`Self::find_all_references`],
+    /// this does not group the results or open any UI; it is the entry point for
+    /// presentations (like the references picker) that want the buffer + anchor
+    /// ranges directly.
+    ///
+    /// `project` is passed in rather than read from the workspace because this
+    /// is invoked from contexts (the references picker) where the workspace is
+    /// already being updated, and reading it again would double-borrow.
+    pub fn references_at_cursor(
+        &mut self,
+        project: &Entity<Project>,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Result<Vec<Location>>>> {
+        let selection = self.selections.newest_anchor();
+        let multi_buffer = self.buffer.read(cx);
+        let multi_buffer_snapshot = multi_buffer.snapshot(cx);
+        let head = selection
+            .map(|anchor| anchor.to_offset(&multi_buffer_snapshot))
+            .head();
+
+        let (buffer, head) = multi_buffer.text_anchor_for_position(head, cx)?;
+        let references = project.update(cx, |project, cx| project.references(&buffer, head, cx));
+        Some(cx.background_spawn(async move {
+            anyhow::Ok(references.await?.unwrap_or_default())
+        }))
+    }
+
     pub fn find_all_references(
         &mut self,
         action: &FindAllReferences,
@@ -2037,6 +2065,52 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         self.go_to_symbol_by_offset(window, cx, -1).detach();
+    }
+
+    /// Opens a single project [`Location`] in the workspace and navigates to its
+    /// range. Lifted from the single-reference fast path of
+    /// [`Self::find_all_references`] so the LSP location pickers can reuse the
+    /// same open mechanics. When `split` is set the location opens in the
+    /// adjacent pane.
+    pub fn open_location(
+        workspace: &mut Workspace,
+        location: &Location,
+        split: bool,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let buffer = location.buffer.clone();
+        let point_range = location.range.to_point(&buffer.read(cx).snapshot());
+
+        let preview_tabs_settings = PreviewTabsSettings::get_global(cx);
+        let keep_old_preview = preview_tabs_settings.enable_keep_preview_on_code_navigation;
+        let allow_new_preview = preview_tabs_settings.enable_preview_file_from_code_navigation;
+
+        let pane = if split {
+            workspace.adjacent_pane(window, cx)
+        } else {
+            workspace.active_pane().clone()
+        };
+
+        let target_editor: Entity<Self> = workspace.open_project_item(
+            pane.clone(),
+            buffer,
+            true,
+            true,
+            keep_old_preview,
+            allow_new_preview,
+            window,
+            cx,
+        );
+        target_editor.update(cx, |target_editor, cx| {
+            let range = target_editor.range_for_match(&point_range);
+            let range = range.start..range.start;
+            // Disable nav history while jumping so we don't record an entry at
+            // the just-opened cursor location.
+            pane.update(cx, |pane, _| pane.disable_history());
+            target_editor.go_to_singleton_buffer_range(range, window, cx);
+            pane.update(cx, |pane, _| pane.enable_history());
+        });
     }
 
     /// Opens a multibuffer with the given project locations in it.

@@ -524,6 +524,17 @@ impl<D: PickerDelegate> Picker<D> {
         self
     }
 
+    /// Opens with the preview pane visible (to the right) instead of the
+    /// persisted/hidden default. Intended for pickers whose entire purpose is
+    /// the preview and which have no settings layer to configure the default
+    /// layout (e.g. the LSP location pickers).
+    pub fn show_preview(mut self) -> Self {
+        if let Some(preview) = &mut self.preview {
+            preview.layout = preview::Layout::Right;
+        }
+        self
+    }
+
     /// Sets the minimum width, the picker can not be resized smaller then this.
     /// Leave unset to use sane defaults.
     ///
